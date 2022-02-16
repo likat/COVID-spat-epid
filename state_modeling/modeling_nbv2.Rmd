@@ -1,0 +1,455 @@
+---
+title: "Modeling (Negative Binomial) version 2"
+output: pdf_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(dplyr)
+library(lubridate)
+library(pscl)
+library(ggplot2)
+
+ppi = 300
+# vaccine <- read.csv("vaccine_cleaned.csv", row.names=1)
+# deathall <- read.csv("Deaths_All_Ages.csv",row.names=1) %>% data.frame() %>% round()
+# death2064 <- read.csv("Deaths_20_64.csv", row.names=1)%>% data.frame()%>% round()
+# death6574 <- read.csv("Deaths_65_74.csv", row.names=1)%>% data.frame()%>% round()
+# death75 <- read.csv("Deaths_75_plus.csv", row.names=1)%>% data.frame()%>% round()
+```
+
+```{r}
+# helper function to clean death data
+deathcleaning <- function(death){
+    death <- 
+    death[,-1] %>% 
+    tidyr::gather(date, deaths, -County)
+  death$deaths <- round(death$deaths)
+  death$date <- sub(".","", death$date) %>% mdy()
+  death <- death %>%
+    filter(date >= "2021-01-04" & date <= "2021-12-04")
+  death$t <- NA
+  uniquedates <- sort(unique(death$date))
+  for(k in 1:length(uniquedates)){
+    tempind <- which(death$date == uniquedates[k])
+    death$t[tempind] <- k
+  }
+  deathres <- death %>% group_by(date) %>% summarise(deaths = sum(deaths),
+                                                        t = mean(t))
+return(deathres)
+}
+Test_Hypothesis1=function(modv0,modv2) {
+  t_v0 = which(names(coefficients(modv0)) == "t")
+  t_v2 = which(names(coefficients(modv2)) == "t")
+  beta_t_0=coefficients(modv0)[t_v0] %>% as.numeric()
+  beta_t_2=coefficients(modv2)[t_v2] %>% as.numeric()
+  beta_t_0_pval = summary(modv0)$coefficients[t_v0,4]
+  beta_t_2_pval = summary(modv2)$coefficients[t_v2,4]
+  var_beta_t_0=summary(modv0)$coefficients[t_v0,2]^2
+  var_beta_t_2=summary(modv2)$coefficients[t_v2,2]^2
+  ci_v0 <- confint(modv0)[t_v0,] %>% as.numeric()
+  ci_v2 <- confint(modv2)[t_v2,] %>% as.numeric()
+  names(var_beta_t_0)=NULL
+  names(var_beta_t_2)=NULL
+  zstat=(beta_t_2-beta_t_0)/sqrt(var_beta_t_0 + var_beta_t_2)
+  pval=2*(1-pnorm(abs(zstat)))
+  return(list("Z"=zstat,"pval"=pval, "betav0" = beta_t_0,
+              "betav0_pval" = beta_t_0_pval,
+              "betav2" = beta_t_2,"betav2_pval" = beta_t_2_pval, "civ0" = ci_v0, "civ2" = ci_v2))
+}
+
+
+#Compares the Delta variant spline (s2) coefficient across vaccine strata using t test
+#Takes in two model objects based on truncated datasets
+#Return Z-Score and p-value
+Test_Hypothesis2=function(modv0,modv2) {
+  t_v0 = which(names(coefficients(modv0)) == "sp2")
+  t_v2 = which(names(coefficients(modv2)) == "sp2")
+  beta_t_0=coefficients(modv0)[t_v0] %>% as.numeric()
+  beta_t_2=coefficients(modv2)[t_v2] %>% as.numeric()
+    beta_t_0_pval = summary(modv0)$coefficients[t_v0,4]
+  beta_t_2_pval = summary(modv2)$coefficients[t_v2,4]
+  var_beta_t_0=summary(modv0)$coefficients[t_v0,2]^2
+  var_beta_t_2=summary(modv2)$coefficients[t_v2,2]^2
+  ci_v0 <- confint(modv0)[t_v0,] %>% as.numeric()
+  ci_v2 <- confint(modv2)[t_v2,] %>% as.numeric()
+  names(var_beta_t_0)=NULL
+  names(var_beta_t_2)=NULL
+  zstat=(beta_t_2-beta_t_0)/sqrt(var_beta_t_0 + var_beta_t_2)
+  pval=2*(1-pnorm(abs(zstat)))
+  return(list("Z"=zstat,"pval"=pval, "betav0" = beta_t_0, "betav0_pval" = beta_t_0_pval,
+              "betav2" = beta_t_2,"betav2_pval" = beta_t_2_pval,  "civ0" = ci_v0, "civ2" = ci_v2))
+}
+
+```
+
+
+We use the truncated data (Jan 4 thru October 26, 2021) for our actual analysis of unvaccinated vs. vaccinated, and include the full data unvaccinated model for sensitivity analysis. \newline
+Again, the hypotheses we are trying to answer are \newline
+
+**Hypothesis I**: Full COVID vaccination can reduce the mortality rate for the general USA population aged 20 or older as well as mortality rates for the age groups of 20-64, 65-74 and 75 or older, respectively. \newline
+**Hypothesis II**: The delta variant weakens the effectiveness of full vaccination against the mortality in the general USA population as well as the age groups of 20-64, 65-74 and 75 or older, respectively. \newline
+
+To answer the first hypothesis, we compare the time coefficient in the vaccinated and unvaccinated models. To answer the second hypothesis, we compare the coefficients of the knot at June 21, 2021 (when delta variant becomes dominant). We use the pooled sample t test under the assumption of independent increments. This is likely not the case, resulting in a less conservative test.
+
+# Models with truncated data
+
+To fix the convergence issue in modeling fully vaccinated deaths, we will restrict the data to three weeks after the first doses of the COVID-19 vaccine doses were administered (three weeks after Dec 14, 2020 is Jan 4, 2021) as this begins the time period where it is possible for individuals to be fully vaccinated (Pfizer second doses are taken no earlier than 3 weeks after the first). Our adjusted timeframe is then Jan 4-Oct. 26, 2021. \newline
+
+Note that this also means we remove the first spline from analysis such that 
+
+$$
+x_t = (1,t,(t-\mu_2)_+,s_t)
+$$
+
+
+
+```{r}
+vaccine <- read.csv("vaccine_cleaned.csv", row.names=1)
+vaccine <- data.frame(vaccine)
+vaccine$date <- ymd(vaccine$date)
+vaccine <- 
+  vaccine %>% 
+  group_by(date, agegrp) %>% 
+  summarise(unvaccinated = sum(unvaccinated),
+            two_dose_count = sum(cumdose2))
+
+
+# restricting to timeframe when full vaccination is possible
+vaccine <- vaccine[vaccine$date>= "2021-01-04", ]
+sp2ind <- which(vaccine$date >= "2021-06-21")
+vaccine$t <- rep(1:length(unique(vaccine$date)), each=3)
+vaccine$s <- sin(2*pi*vaccine$t/18)
+vaccine$s2 <- cos(2*pi*vaccine$t/26)
+vaccine$s3 <- cos(2*pi*vaccine$t/18)
+vaccine$s4 <- sin(2*pi*vaccine$t/26)
+vaccine$sp2 <- 0
+vaccine$sp2[sp2ind] <- vaccine$t[sp2ind] - sum(unique(vaccine$date) <"2021-06-21")
+vaccine$logv0 <- log(vaccine$unvaccinated)
+vaccine$logv2 <- log(vaccine$two_dose_count + 0.0001)
+vaccine$date <- NULL
+## marginal df for vaccine
+vaccineall <- vaccine %>% group_by(t) %>% summarise(
+  s=mean(s),
+  s2=mean(s2),
+  s3=mean(s3),
+  s4=mean(s4),
+  sp2=mean(sp2),
+  v0=sum(unvaccinated),
+  v2 = sum(two_dose_count),
+   logv0 = log(v0),
+   logv2 = log(v2+ 0.0001)
+) 
+modeldf_v0 <- 
+  readr::read_csv("Unvaccinated_Marginal.csv") %>% 
+  deathcleaning() %>% 
+  left_join(vaccineall,by="t")
+modeldf_v2 <- readr::read_csv("Fully_Vaccinated_Marginal_Counts.csv")%>% 
+  deathcleaning() %>% 
+  left_join(vaccineall,by="t")
+modeldf2064_v0 <- readr::read_csv("Unvaccinated_20_64.csv")%>% 
+  deathcleaning() %>% 
+  left_join(vaccine[vaccine$agegrp=="20-64 years",],by="t")
+modeldf2064_v2 <- readr::read_csv("Fully_Vaccinated_20_64.csv")%>% 
+  deathcleaning()%>% 
+  left_join(vaccine[vaccine$agegrp=="20-64 years",],by="t")
+modeldf6574_v0 <- readr::read_csv("Unvaccinated_65_74.csv")%>% 
+  deathcleaning()%>% 
+  left_join(vaccine[vaccine$agegrp=="65-74 years",],by="t")
+modeldf6574_v2 <- readr::read_csv("Fully_Vaccinated_65_74.csv")%>% 
+  deathcleaning()%>% 
+  left_join(vaccine[vaccine$agegrp=="65-74 years",],by="t")
+modeldf75_v0 <- readr::read_csv("Unvaccinated_75_plus.csv")%>% 
+  deathcleaning()%>% 
+  left_join(vaccine[vaccine$agegrp=="75+ years",],by="t")
+modeldf75_v2 <- readr::read_csv("Fully_Vaccinated_75_plus.csv")%>% 
+  deathcleaning()%>% 
+  left_join(vaccine[vaccine$agegrp=="75+ years",],by='t')
+
+```
+
+Marginal models
+
+```{r}
+## Unvaccinated
+modv0 <- MASS::glm.nb(deaths ~  t + s+s2 +s3+s4+ sp2 + offset(logv0), data = modeldf_v0)
+summary(modv0)
+odTest(modv0)
+resid <- residuals(modv0, "pearson")
+plot(x = modeldf_v0$t,
+     y = resid,
+     main = "Pearson residuals for unvaccinated",
+     xlab = "Weeks",
+     ylab = "Pearson residuals", pch=20)
+
+## Fully vaccinated
+# modv2 <-MASS::glm.nb(deaths ~  t + s+s2 +s3+s4+ sp2 + offset(logv2), data = modeldf_v2)
+# odTest(modv2) ## fail to reject; not overdispersed enough
+modv2 <-glm(deaths ~  t + s+s2 +s3+s4+ sp2 + offset(logv2), data = modeldf_v2,family="poisson")
+summary(modv2)
+resid <- residuals(modv2, "pearson")
+plot(x = modeldf_v0$t,
+     y = resid,
+     main = "Pearson residuals for fully vaccinated",
+     xlab = "Weeks",
+     ylab = "Pearson residuals", pch=20)
+
+```
+
+Models x age
+
+```{r}
+
+##====== 20-64 ==========
+## Unvaccinated
+modv0_2064 <- MASS::glm.nb(deaths ~  t + s+s2 +s3+s4+ sp2 + offset(logv0), data = modeldf2064_v0,control = glm.control(maxit = 100))
+odTest(modv0_2064) # dispersed enough to do NB
+summary(modv0_2064)
+resid <- residuals(modv0_2064, "pearson")
+plot(x = 1:48,
+     y = resid,
+     main = "Pearson residuals for 20-64 unvaccinated",
+     xlab = "Weeks",
+     ylab = "Pearson residuals", pch=20)
+## Fully vaccinated
+# modv2_2064 <- MASS::glm.nb(deaths ~  t + s+s2 +s3+s4+ sp2 +  offset(logv2), data = modeldf2064_v2)
+# odTest(modv2_2064) #  NOT dispersed enough to do NB
+modv2_2064 <- glm(deaths ~  t + s+s2 +s3+s4+ sp2 +  offset(logv2), data = modeldf2064_v2,
+                         family = "poisson")
+
+summary(modv2_2064)
+resid <- residuals(modv2_2064, "pearson")
+plot(x = 1:48,
+     y = resid,
+     main = "Pearson residuals for 20-64 fully vaccinated",
+     xlab = "Weeks",
+     ylab = "Pearson residuals", pch=20)
+```
+
+
+```{r}
+##====== 65-74 ==========
+## Unvaccinated
+modv0_6574 <- MASS::glm.nb(deaths ~  t + s+s2 +s3+s4+ sp2 +  offset(logv0), data = modeldf6574_v0,control = glm.control(maxit = 100))
+odTest(modv0_6574) # dispersed enough to do NB
+summary(modv0_6574)
+resid <- residuals(modv0_6574, "pearson")
+plot(x = 1:48,
+     y = resid,
+     main = "Pearson residuals for 65-74 unvaccinated",
+     xlab = "Weeks",
+     ylab = "Pearson residuals", pch=20)
+
+## Fully vaccinated
+# modv2_6574 <- MASS::glm.nb(deaths ~  t + s+s2 +s3+s4+ sp2 +  offset(logv2), data = modeldf6574_v2)
+# odTest(modv2_6574) # not dispersed enough to do NB
+modv2_6574 <-glm(deaths ~  t + s+s2 +s3+s4+ sp2 +  offset(logv2), data = modeldf6574_v2,
+                        family="poisson")
+summary(modv2_6574) 
+resid <- residuals(modv2_6574, "pearson")
+plot(x = 1:48,
+     y = resid,
+     main = "Pearson residuals for 65-74 fully vaccinated",
+     xlab = "Weeks",
+     ylab = "Pearson residuals", pch=20)
+
+```
+
+
+```{r}
+##====== 75+ ==========
+## Unvaccinated
+modv0_75 <- MASS::glm.nb(deaths ~  t + s+s2 +s3+s4+ sp2 +  offset(logv0), data = modeldf75_v0)
+odTest(modv0_75) # dispersed enough to do NB
+summary(modv0_75)
+resid <- residuals(modv0_75, "pearson")
+plot(x =1:48,
+     y = resid,
+     main = "Pearson residuals for 75+ unvaccinated",
+     xlab = "Weeks",
+     ylab = "Pearson residuals", pch=20)
+## Fully vaccinated
+# modv2_75 <- MASS::glm.nb(deaths ~  t + s+s2 +s3+s4+ sp2 +  offset(logv2), data = modeldf75_v2)
+# odTest(modv2_75) # need to do poisson
+modv2_75 <- glm(deaths ~  t + s+s2 +s3+s4+ sp2 +  offset(logv2), data = modeldf75_v2,
+                       family="poisson")
+
+summary(modv2_75)
+
+resid <- residuals(modv2_75, "pearson")
+plot(x = 1:48,
+     y = resid,
+     main = "Pearson residuals for 75+ fully vaccinated",
+     xlab = "Weeks",
+     ylab = "Pearson residuals", pch=20)
+
+
+```
+
+# Hypothesis testing
+
+## Hypothesis 1 
+
+Comparing the coefficient for $t$ in the unvaccinated models to that of the vaccinated model.
+
+```{r H1 results}
+## Marginal models
+overall_h1 <- Test_Hypothesis1(modv0=modv0, modv2=modv2)
+
+## Ages
+age2064_h1 <- Test_Hypothesis1(modv0=modv0_2064, modv2=modv2_2064)
+age6574_h1 <- Test_Hypothesis1(modv0=modv0_6574, modv2=modv2_6574)
+age75_h1 <- Test_Hypothesis1(modv0=modv0_75, modv2=modv2_75)
+```
+
+
+## Hypothesis 2
+
+Comparing the second spline between the vaccinated and unvaccinated models.
+
+```{r H2 results}
+## Marginal models
+overall_h2 <- Test_Hypothesis2(modv0=modv0, modv2=modv2)
+
+## Ages
+age2064_h2 <- Test_Hypothesis2(modv0=modv0_2064, modv2=modv2_2064)
+age6574_h2 <- Test_Hypothesis2(modv0=modv0_6574, modv2=modv2_6574)
+age75_h2 <- Test_Hypothesis2(modv0=modv0_75, modv2=modv2_75)
+
+```
+
+```{r}
+resultmat_h1 <- bind_rows(unlist(overall_h1),
+                       unlist(age2064_h1),
+                       unlist(age6574_h1),
+                       unlist(age75_h1)) 
+resultmat_h2 <- bind_rows(unlist(overall_h2),
+                       unlist(age2064_h2),
+                       unlist(age6574_h2),
+                       unlist(age75_h2))
+resultmat_h1; resultmat_h2
+
+# write.csv(resultmat_h1,"~/Dropbox (University of Michigan)/Katherine Li’s files/BIOSTAT830/project/results/h1_results.csv")
+# write.csv(resultmat_h2,"~/Dropbox (University of Michigan)/Katherine Li’s files/BIOSTAT830/project/results/h2_results.csv")
+
+```
+
+
+**Comments**: 
+
+ - For hypothesis 1, there is a significant difference between the vaccinated and unvaccinated groups: the incident rate of deaths is much higher for unvaccinated groups. Even if we consider the independent increment assumption to be faulty, the small p-values imply that this is a fairly strong result.
+ - For hypothesis 2, the p-values are either nonsignificant or borderline (close to 0.05) for all categories except those 75 or older. There is a clear bounceback in death rates for the vaccinated elderly after the Delta variant becomes the dominant strain of COVID-19, while there is little change in death rates across all unvaccinated groups.
+
+# Forest plots of results
+
+Here, we will plot two forest plots (one for each hypothesis), each faceted into 4 panels (overall, age categories) with the point and CI estimates from the coefficient of interest. Confidence intervals are obtained from profile likelihood using the ``confint()'' function.
+
+```{r forest plots for h1}
+
+ grps = factor(c("Overall", "20-64", "65-74", "75+"), levels = c( "75+", "65-74","20-64", "Overall"))
+ plotdf_srbi <- 
+   expand.grid(
+      group=grps,
+      Vaccination=c("None", "Full")
+   ) %>% 
+   mutate(
+     # estimate = c(overall_h1$betav0, age2064_h1$betav0, age6574_h1$betav0, age75_h1$betav0,
+     #              overall_h1$betav2, age2064_h1$betav2, age6574_h1$betav2, age75_h1$betav2),
+     # CIlower = c(overall_h1$civ0[1], age2064_h1$civ0[1], age6574_h1$civ0[1], age75_h1$civ0[1],
+     #              overall_h1$civ2[1], age2064_h1$civ2[1], age6574_h1$civ2[1], age75_h1$civ2[1]),
+     # CIupper =  c(overall_h1$civ0[2], age2064_h1$civ0[2], age6574_h1$civ0[2], age75_h1$civ0[2],
+     #              overall_h1$civ2[2], age2064_h1$civ2[2], age6574_h1$civ2[2], age75_h1$civ2[2])
+    estimate = exp(c(overall_h1$betav0, age2064_h1$betav0, age6574_h1$betav0, age75_h1$betav0,
+                  overall_h1$betav2, age2064_h1$betav2, age6574_h1$betav2, age75_h1$betav2)),
+     CIlower = exp(c(overall_h1$civ0[1], age2064_h1$civ0[1], age6574_h1$civ0[1], age75_h1$civ0[1],
+                  overall_h1$civ2[1], age2064_h1$civ2[1], age6574_h1$civ2[1], age75_h1$civ2[1])),
+     CIupper =  exp(c(overall_h1$civ0[2], age2064_h1$civ0[2], age6574_h1$civ0[2], age75_h1$civ0[2],
+                  overall_h1$civ2[2], age2064_h1$civ2[2], age6574_h1$civ2[2], age75_h1$civ2[2]))
+
+   ) 
+ 
+# png(
+#   filename="~/Dropbox (University of Michigan)/Katherine Li’s files/BIOSTAT830/project/graphics/forest_time.png",
+#   width = 6.5*ppi, height = 4*ppi, res = ppi)
+
+ ggplot(data=plotdf_srbi,
+        aes(x = Vaccination,y = estimate, ymin = CIlower, ymax = CIupper))+
+    geom_pointrange(aes(col=Vaccination, shape=Vaccination))+
+    xlab('Age group')+ 
+    ylab("Estimate (95% Confidence Interval)")+
+    geom_errorbar(
+       aes(ymin=CIlower, ymax=CIupper,col=Vaccination),
+       width=0.25,cex=1
+    )+
+    # geom_hline(mapping = aes(yintercept = wtdestimate),data=vertline, linetype="dashed")+
+    # geom_hline(mapping = aes(yintercept = CIlow),data=vertline, linetype="dotted")+
+    # geom_hline(mapping = aes(yintercept = CIhi),data=vertline, linetype="dotted")+
+    facet_wrap(~group,
+               strip.position="left",
+               nrow=9,scales = "free_y") +
+    theme(
+       axis.text.y=element_blank(),
+       axis.ticks.y=element_blank())+
+      geom_hline(yintercept=1, linetype="dotted")+
+    scale_y_continuous(limits = exp(c(-2, 1.6)))+ ## incidence rate ratio interpretation; remove "exp" if coefficient
+    coord_flip() + 
+    labs(title = "Estimated mortality rate ratio for time effect")
+ # dev.off()
+```
+
+
+```{r forest plots for h2}
+
+
+ grps = factor(c("Overall", "20-64", "65-74", "75+"), levels = c( "75+", "65-74","20-64", "Overall"))
+ plotdf_srbi <- 
+   expand.grid(
+      group=grps,
+      Vaccination=c("None", "Full")
+   ) %>% 
+   mutate(
+     # estimate = c(overall_h2$betav0, age2064_h2$betav0, age6574_h2$betav0, age75_h2$betav0,
+     #              overall_h2$betav2, age2064_h2$betav2, age6574_h2$betav2, age75_h2$betav2),
+     # CIlower = c(overall_h2$civ0[1], age2064_h2$civ0[1], age6574_h2$civ0[1], age75_h2$civ0[1],
+     #              overall_h2$civ2[1], age2064_h2$civ2[1], age6574_h2$civ2[1], age75_h2$civ2[1]),
+     # CIupper =  c(overall_h2$civ0[2], age2064_h2$civ0[2], age6574_h2$civ0[2], age75_h2$civ0[2],
+     #              overall_h2$civ2[2], age2064_h2$civ2[2], age6574_h2$civ2[2], age75_h2$civ2[2])
+    estimate = exp(c(overall_h2$betav0, age2064_h2$betav0, age6574_h2$betav0, age75_h2$betav0,
+                  overall_h2$betav2, age2064_h2$betav2, age6574_h2$betav2, age75_h2$betav2)),
+     CIlower = exp(c(overall_h2$civ0[1], age2064_h2$civ0[1], age6574_h2$civ0[1], age75_h2$civ0[1],
+                  overall_h2$civ2[1], age2064_h2$civ2[1], age6574_h2$civ2[1], age75_h2$civ2[1])),
+     CIupper =  exp(c(overall_h2$civ0[2], age2064_h2$civ0[2], age6574_h2$civ0[2], age75_h2$civ0[2],
+                  overall_h2$civ2[2], age2064_h2$civ2[2], age6574_h2$civ2[2], age75_h2$civ2[2]))
+
+   ) 
+ 
+# png(
+#   filename="~/Dropbox (University of Michigan)/Katherine Li’s files/BIOSTAT830/project/graphics/forest_delta.png",
+#   width = 6.5*ppi, height = 4*ppi, res = ppi)
+
+ ggplot(data=plotdf_srbi,
+        aes(x = Vaccination,
+            y = estimate, ymin = CIlower, ymax = CIupper))+
+    geom_pointrange(aes(col=Vaccination, shape=Vaccination))+
+    xlab('Age group')+ 
+    ylab("Estimate (95% Confidence Interval)")+
+    geom_errorbar(
+       aes(ymin=CIlower, ymax=CIupper,col=Vaccination),
+       width=0.25,cex=1
+    )+
+    # geom_hline(mapping = aes(yintercept = wtdestimate),data=vertline, linetype="dashed")+
+    # geom_hline(mapping = aes(yintercept = CIlow),data=vertline, linetype="dotted")+
+    # geom_hline(mapping = aes(yintercept = CIhi),data=vertline, linetype="dotted")+
+    facet_wrap(~group,
+               strip.position="left",
+               nrow=9,scales = "free_y") +
+    theme(
+       axis.text.y=element_blank(),
+       axis.ticks.y=element_blank())+
+    coord_flip() + 
+   geom_hline(yintercept=1, linetype="dotted")+
+   scale_y_continuous(limits = exp(c(-2, 1.6)))+
+   labs(title = "Estimated mortality rate ratio for Delta linear spline") 
+# dev.off()
+
+```
